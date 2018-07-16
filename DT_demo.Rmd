@@ -1,0 +1,300 @@
+
+# Decision Trees in R for Engineers and Geoscientists 
+### Michael Pyrcz, Associate Professor, University of Texas at Austin, 
+
+#### Contacts: [Twitter/@GeostatsGuy](https://twitter.com/geostatsguy) | [GitHub/GeostatsGuy](https://github.com/GeostatsGuy) | [www.michaelpyrcz.com](http://michaelpyrcz.com) | [GoogleScholar](https://scholar.google.com/citations?user=QVZ20eQAAAAJ&hl=en&oi=ao) | [Book](https://www.amazon.com/Geostatistical-Reservoir-Modeling-Michael-Pyrcz/dp/0199731446)
+
+This is a tutorial/demonstration of decision trees in R. Decision trees are one of the easiest machine learning prediction methods to explain, apply and interogate.  In addition, understanding decision tree-based prediction is a prerequisite to more complicated and powerful methods such as random forest and tree-based bagging and boosting.  For this demonstration we use a 1,000 well 8D unconventional dataset (file: unconv_MV_v2.csv) that is available on GitHub at https://github.com/GeostatsGuy/GeoDataSets. This dataset includes 6 predictors (features) and 2 responses.  We take this multivariate dataset and only retain the three variables (2 predictors and 1 response) for a simple demonstration of the decision tree method. We break the data set into 500 training data and 500 testing data.  I used this tutorial in my Introduction to Geostatistics undergraduate class (PGE337 at UT Austin) as part of a first introduction to geostatistics and R for the engineering undergraduate students. It is assumed that students have no previous R, geostatistics nor machine learning experience; therefore, all steps of the code and workflow are explored and described. This tutorial is augmented with course notes in my class.  The R code and R markdown was developed and tested in RStudio.  
+
+#### Load the required libraries
+
+Let's get access to the various libraries that we will need to complete data analysis, model building and checking.
+
+```{r}
+library(plyr)                                  # splitting, applying and combining data by Hadley Wickham 
+library(ggplot2)                               # for the custom biplot
+library(lattice)                               # for the matrix scatter plot
+library(corrplot)                              # for the corrplot correlation plot
+library(tree)                                  # for decision tree
+```
+
+If you get a package error, you may have to first go to "Tools/Install Packages..." on the main menubar at the top of the RStudio interface to install these packages. Just type in the names one at a time into the package field and install.  The package names should autocomplete (helping you make sure you got the package name right), and the install process is automatic, with the possibility of installing other required dependency packages.  Previously, I had an issue with packages not being found after install that was resolved with a reboot. If you get warnings concerning the package being built on a previous R version, don't worry. This will not likely be an issue.
+
+#### Declare functions
+No functions are required in this demonstration.
+
+#### Set the working directory
+
+I always like to do this so I don't lose output files and to simplify subsequent read and writes (avoid including the full address each time).
+
+```{r}
+setwd("C:/PGE337/DT")                          # choose your local working directory
+```
+
+You will have to change this to your working directory and change the format for the Mac OS (e.g. "~/PGE").  If stuck consider using the GUI to set the working directory. In the RStudio interface, navigate to the working folder in 'Files' and then go to 'Files/More/Set As Working Directory' in the files pane to the right.  You can then copy the command from the console to replace the above.
+
+#### Read the data table
+
+Copy the "unconv_MV_v2.csv" comma delimited dataset file from https://github.com/GeostatsGuy/GeoDataSets to your working directory.  First, read the file in to a dataframe with this command.  Dataframes are the standard object in R to hold a data table.  Each column has a name of a variable at the top and the repsective values below and each row is a sample.  The dataframe automatically adds a sample index, $i = 1,\ldots,n$.
+
+```{r}
+mydata = read.csv("unconv_MV_v2.csv")          # read in comma delimited data file
+```
+
+Let's visualize the first several rows of our dataframe so we can make sure we successfully loaded the data file.
+
+```{r}
+head(mydata)                                   # preview first several rows in the console
+```
+
+It is convenient to get summary statistics for each feature with the summary command.
+
+```{r}
+summary(mydata)                                # summary statistics for the multivariate data file
+```
+
+This dataset has variables from 1,000 unconventional wells including: 1. well average porosity, 2. log transform of permeability (to linearize the relationships with other variables), 3. accoustic impedance (kg/m2s*10^6), 4. brittness ratio (%), 5. total organic carbon (%), 6. vitrinite reflectance (%), 7. initial production 90 day average (MCFPD), and 8. normalized initial production 90 day average (MCFPD). Note, the dataset is synthetic.
+
+#### Calculate the correlation matrix 
+
+For multivariate analysis it is a good idea to check the correlation matrix.  We can calculate it and view it in the console with these commands.
+
+```{r}
+mydata_noindex <- mydata[,2:length(mydata)]    # remove the first column with the well index
+cor_matrix <- round(cor(mydata_noindex),2)     # calculate a mxm matrix with the correlation coeficients
+cor_matrix
+```
+
+Note the 1.0 diagonal resulting from the correlation of each variable with themselves.  
+
+Let's use the corrplot package to make a very nice correlation matrix visualization.  This may inprove our ability to spot features.
+
+```{r}
+corrplot(cor_matrix, method = "circle")        # graphical correlation matrix plot
+```
+
+This looks good. The only potential colinearity is between the two production measures and this makes since since the $2^{nd}$ production measure is just a normalized version of the $1^{st}$ production measure.  We will only use the normalized initial production measure from now one. 
+
+There is a mixture of strengths of bivariate, linear correlation. Of course, correlation coeffficients are limited to degree of linear correlations.  For more complete information, let's look at the matrix scatter plot from the lattice package. 
+
+```{r}
+splom(mydata[c(2,3,4,5,6,7,9)],col=rgb(0,0,0,50,maxColorValue=255), pch=19,main = "Unconventional Dataset") 
+```
+
+There are a variety of interesting heteroscedastic and constraint behavoirs with the $2^{nd}$ initial production (normalized) and the remaining variables appear to be multivariate Gaussian.  For transparency, this is due to the fact that the features were calculated from a multivariate Gaussian distribution and then production was formulated as a somewhat more complicated combination of the predictors.    
+
+#### Regular Data Analysis
+
+Let's simplify the problem to trivariate (2 features + 1 response), including porosity, brittlenss and the $2^{nd}$ initial production measure. I like to build a new dataframe with only the variables that I'm working with.  This avoids blunders!  That way if I accidentally call for the wrong variable I will get an error.  Here's one way to make the new, simplified dataframe.  
+
+```{r}
+mydata_por <- data.frame(mydata[1:1000,2])     # extract and rename 2 features, 1 predictor from the original dataframe
+colnames(mydata_por) <- "Por"    
+mydata_brittle <- data.frame(mydata[1:1000,5])   
+colnames(mydata_brittle) <- "Brittle"
+mydata_prod <- data.frame(mydata[1:1000,9])
+colnames(mydata_prod) <- "Prod" 
+mydata_3var <- cbind(mydata_por,mydata_brittle,mydata_prod)
+head(mydata_3var)                              # check the new dataframe
+```
+
+It is always a good idea to start with checking the histograms of the features and response.  In machine learning, we still use basic statistical analysis!
+
+```{r}
+par(mfrow=c(1,3))
+hist(mydata_3var$Por,xlab = "Porosity (%)",main ="")
+hist(mydata_3var$Brittle, xlab = "Brittleness (%)",main ="")
+hist(mydata_3var$Prod, xlab = "Production (MCFPD)",main ="")
+
+```
+
+The distributions look reasonable.  They are not too noisy and there are no gaps; therefore, it looks like we have enough samples.  Of course, there is the possiblity of spatial bias in the sampling; therefore, we cannot assume these distributions are representative of the feature nor the model space.  We would have to apply spatial declustering with the data locations and model extents considered. For this tutorial we will not cover this for brevity.  Let's look at a scatter plots of initial production vs. porosity and brittleness to further check the bivariate relationships.
+
+```{r}
+par(mfrow=c(1,2))                              # check out the production vs. porosity and brittleness
+plot(mydata_3var$Por,mydata_3var$Prod, main="Production vs. Porosity", 
+     xlab="Porosity (%)", ylab="Production (MCFPD)", col = alpha("black",0.1), pch=19)
+plot(mydata_3var$Brittle,mydata_3var$Prod, main="Production vs. Brittleness", 
+     xlab="Brittleness (%)", ylab="Production (MCFPD)", col = alpha("black",0.1), pch=19)
+```
+
+This looks pretty good.  There is a monotonic increase of production with increase in porosity along with heteroscedasticity (change in the conditional variance of production given porosity).  Brittleness seems to have a production sweet spot, this could be explained as rock that is not too soft nor too hard fractures best for fluid flow.
+
+You may be wondering what is the $pch$ parameter?  It is the code for the symbols to use on the scatter plot.  Google it and you'll see a whole list of simbols with codes. I like filled circles, the default is empty circles.  
+
+Let's plot porosity vs. brittleness with production as greyscale and see how well we sample and cover the solution space and to check for patterns.
+
+```{r} 
+prod.deciles <- quantile(mydata_3var$Prod, 0:10/10)
+cut.prod    <- cut(mydata_3var$Prod, prod.deciles, include.lowest=TRUE)
+plot(mydata_3var$Por,mydata_3var$Brittle, col=grey(10:2/11)[cut.prod], pch=20, xlab="Porosity (%)",ylab="Brittleness (%)",main="Training Production (MCFPD)")
+```
+
+This looks interesting.  There is complicated, nonlinear relationship between porosity, brittleness and production.  Also, we would want to be careful with extrapolation in areas that are poorly sampled along the edges and for the gap in data over high porosity and mid brittleness values.
+
+#### Decision Tree Construction
+
+We will use random processes; therefore, to ensure repeatability between runs let's set the random number generator seed value.
+```{r}
+set.seed(71071)
+```
+
+Let's extract a subset of the data to use as training data and the remainder as withhold as  testing data.  The sample command forms a random set of indexes (with or without replacement) that we may use to formulate a random subset.  Then we just have to extract those indices to a training dataset and the compliment of the indices to a testing dataset.
+```{r}
+train_ind <- sample(seq_len(nrow(mydata_3var)), size = 500, replace = FALSE)
+train <- mydata_3var[train_ind, ]
+test <- mydata_3var[-train_ind, ]
+```
+
+Let's check the training data to make sure it has the correct format.
+
+```{r}
+head(train)                                     # note the indexes are randomized
+```
+The training data looks fine, and now let's look at the testing data.
+```{r}
+head(test)                                     # note the indexes are randomized
+```
+
+Let's plot the training data set and compare to the original data set to check the coverage of the solution space.
+```{r}
+par(mfrow=c(1,2))
+cut.prod    <- cut(mydata_3var$Prod, prod.deciles, include.lowest=TRUE)
+plot(mydata_3var$Por,mydata_3var$Brittle, col=grey(10:2/11)[cut.prod], pch=20, xlab="Porosity (%)",ylab="Brittleness (%)",main="Training Production (MCFPD)")
+
+cut.train.prod <- cut(train$Prod, prod.deciles, include.lowest=TRUE)
+plot(train$Por,train$Brittle, col=grey(10:2/11)[cut.train.prod], pch=20, xlab="Porosity (%)",ylab="Brittleness (%)",main="Testing Production (MCFPD)")
+```
+
+With the density and coverage of training data this will not be a difficult prediction exercise as the preduction response is somewhat smooth.  We would want to be careful to avoid using this model with new predictor data with value combinations outside the training and testing datasets.
+
+Here are the controls on the tree growth. We actually start with the program defaults, but it is good to be cognizant of what we are assuming.
+
+```{r}
+tree.control = tree.control(nobs = 500, mincut = 5, minsize = 10, mindev = 0.01)
+```
+
+Here is a brief description of the parameters.  For more details see the docs at https://cran.r-project.org/web/packages/tree/tree.pdf: 1. $nobs$ is the number of data in training set, 2. $mincut$ / $minsize$ are minimum node size constraints and 3. $mindev$ is the minimum deviation in a node to allow a split.
+
+Once again these of the defaults in the package and you can change these later and rerun to observe increased or decreased tree complexity.  Now we are ready to train our decision tree on our training dataset.
+
+```{r}
+tree.prod = tree(Prod~Por+Brittle,train,control = tree.control)
+```
+
+This command produces our decision tree object, $tree.prod$.  We can apply the summary command to get some basic information on our tree.
+
+```{r}
+summary(tree.prod)                              # note complexity in number of terminal nodes / regions
+```
+
+From the summary, you can confirm the model predictors and response variables in the model, and assess the tree complexity measured in number of terminal nodes (or regions in the solution space). The accuracy of the model with regard to the training dataset is provided as the average residual sum of squares (residual sum of squares divided by number of terminal nodes) and the summary statistics of the residuals are included to check for systematic estimation bias.
+
+One of the advantages of the decision tree is that it may be view graphically.  Let's take a look at our decision tree.
+
+```{r}
+plot(tree.prod)                                 # plots the decision tree
+text(tree.prod,pretty=0,cex = 0.6)                        # adds the decision rules
+```
+
+To interprete the tree, start at the top with the first binary split of the solution space into 2 regions with a threshold applied to one variable (porosity < 15.53) and then follow each branch to track the binary recusive splits in the tree until you get to the terminal nodes.  Each terminal node represents a region of the solution space.  Over each region, the regression estimate of production is the average of the training data in that region. Note: the branch lengths are proportional to the decrease in impurity (for a classification tree estimating a categorical response this would be a measure of misclassification, but for a regression tree estimating a continuous response this is the decrease in average residual sum of squares).
+
+Another good way to visualize our tree is to review the regions and estimates superimposed over the training data in the solution space.  This is one reason we only choose 2 predictors for this tutorial so we could review the tree model and explain the concept so easily.  For greater dimensionality, one could look at the solution space 2 variables at a time to visualize the training data and tree model.  
+
+```{r}
+plot(mydata_3var$Por,mydata_3var$Brittle, col=grey(10:2/11)[cut.prod], pch=20, cex=0.8, xlab="Porosity (%)",ylab="Brittleness (%)")
+partition.tree(tree.prod, ordvars=c("Por","Brittle"), cex=0.6,add=TRUE)
+```
+
+#### Decision Tree Pruning
+
+Our tree may be too complicated. Complicated trees are at risk of being overfit, that is demonstrating good accuracy with training datasets, but poor accuracy with testing datasets. Pruning based on cross validation is the common workflow.  We run a k-fold cross validation study with an set of new trained trees spanning from simple (1 terminal node) to the the complexity of our current tree (12 terminal nodes) on the training dataset.  We can then plot the average residual sum of squares vs. the number of terminal nodes.  This all gets done with a very simple command, $cv.tree$!
+
+```{r}
+cv.prod = cv.tree(tree.prod,K = 10)             # this runs the k-fold cross validation and report RSS
+plot(cv.prod$size,cv.prod$dev,type='b',xlab="Number of Terminal Nodes",ylab="Avg. Res. Sum of Squares")
+```
+
+Note $K$ is the number of folds in the k-fold cross validation. The dataset is divided into $K$ subsets and for each iteration $k = ,\ldots,K$, $k$ subset is applied as a "test" dataset and the remainder is applied to train.  The error is average over each iteration, known as a fold.
+
+We review this result to identify the desired tree complexity.  This could be done in a couple ways.  Firstly, one could look at diminishing returns, or the decrease in plot slope (inflection points) where increasing tree complexity has little additional improvement accuracy.  Secondly, one could identify an acceptable error rate and select complexity required to reach that error rate.  If one selects a reduced complexity decision tree, then it is simple to prune the decision tree model with the $prune.tree$ command.    
+
+```{r}
+prune.prod = prune.tree(tree.prod,best = 6)     # we reduce the complexity of the tree to 6 terminal nodes
+```
+ 
+Let's look at the new pruned tree side-by-side with the original unpruned decision tree.
+
+```{r}
+par(mfrow=c(2,2))                               # compare orginal and pruned tree
+
+plot(tree.prod)
+text(tree.prod,pretty=0,cex=0.6)
+
+plot(prune.prod)
+text(prune.prod,pretty=0,cex=0.6)
+
+plot(mydata_3var$Por,mydata_3var$Brittle, col=grey(10:2/11)[cut.prod], pch=20, cex=0.6, xlab="Porosity (%)",ylab="Brittleness (%)")
+partition.tree(tree.prod, ordvars=c("Por","Brittle"), cex=0.6,add=TRUE)
+
+plot(mydata_3var$Por,mydata_3var$Brittle, col=grey(10:2/11)[cut.prod], pch=20, cex = 0.6, xlab="Porosity (%)",ylab="Brittleness (%)")
+partition.tree(prune.prod, ordvars=c("Por","Brittle"), cex = 0.6, add=TRUE)
+```
+
+Note the reduction is the number of branches and regions for the pruned model.
+
+#### Decision Tree Prediction
+
+Let's use our pruned tree to make predictions with the withheld test dataset.  We uset he $predict$ command with our pruned tree and specify the test dataset. You must make sure the feature names in the testing dataset are exactly the same as the training dataset or you will get an error.  Note, the names are caps sensitive.
+
+```{r}
+yhat.prod = predict(prune.prod,newdata = test)  # predict with the tree
+```
+
+To evaluate the performance of our decision tree on the test dataset let's plot the truth values in the test dataset vs. the predictions. $Yhat.prod$ is a 1D vector with the estimates in the same order as the test dataset so we plot them like this.  
+
+```{r}
+par(mfrow=c(1,1))                               # testing data vs. prediction
+plot(yhat.prod,test$Prod,xlim = c(0,8000), ylim = c(0,8000),xlab = "Estimated Well Production (MCFPD)",ylab = "Test Well Production (MCFPD)")
+abline(0,1)                                     # add a 45 degree line to the scatter plot
+```
+
+See the binning of the estimates?  This is due to the fact that with decision trees that we only have a limited number of terminal nodes.  A regression decision tree model estimates with the average of the training data in each terminal node / region.  To evaluate the goodness of our model for prediction with the testing dataset we can calculate the mean square error (MSE) and the square root of the MSE.
+
+```{r}
+MSE = mean((yhat.prod - test$Prod)^2)           # calculate the mean square error
+SQRT_MSE = sqrt(MSE)                            # calculate the square root of mean square error 
+MSE
+SQRT_MSE
+```
+
+It is also useful to compare the MSE to the total variance.  
+
+```{r}
+var.prod = var(test$Prod)                       # variance of production 
+var.prod
+```
+
+#### Additional Ideas
+
+On your own try working working with more and less complicated trees.  For example set $mindev = 0.001$ and observe a much more complicated tree.  Observe the cross validation plot of average residual sum of squares vs. number of terminal nodes.  You'll observe a level of complexity after which there is almost no incremental improvement in prediction accuracy on the training dataset.
+
+You could use the initial multivariate statistical summaries (i.e. correlation matrix and matrix scatterplot) to select a couple more predictors to include in the decision tree model and then plot the decision tree and projections of the model 2 variables at a time.  Does this improve the model accuracy with the training and testing datasets?
+
+Finally, for improved regression accuracy consider attempting bagging, random forest and boosting.  Shortly, I will try to release tutorials for these methods.
+
+I hope you found this tutorial useful.  I'm always happy to discuss geostatistics, statistical modeling, uncertainty modeling and machine learning,
+
+
+![](c:/PGE337/mjp_signature.png)
+
+
+Michael Pyrcz, Ph.D., P.Eng.
+
+Associate Professor
+
+The Hildebrand Department of Petroleum and Geosystems Engineering
+
+The University of Texas at Austin
+
+

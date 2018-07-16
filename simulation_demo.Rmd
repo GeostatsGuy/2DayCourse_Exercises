@@ -1,0 +1,442 @@
+# Geostatistical SImulation Tutorial in R for Engineers and Geoscientists 
+### Michael Pyrcz, Associate Professor, University of Texas at Austin, 
+
+#### Contacts: [Twitter/@GeostatsGuy](https://twitter.com/geostatsguy) | [GitHub/GeostatsGuy](https://github.com/GeostatsGuy) | [www.michaelpyrcz.com](http://michaelpyrcz.com) | [GoogleScholar](https://scholar.google.com/citations?user=QVZ20eQAAAAJ&hl=en&oi=ao) | [Book](https://www.amazon.com/Geostatistical-Reservoir-Modeling-Michael-Pyrcz/dp/0199731446)
+
+A tutorial/demonstration of spatial simulation with sequential Gaussian simulation based on ordinary kriging untilizing the gstat package by Pedesma, E. The docs are at https://cran.r-project.org/web/packages/gstat/index.html.  I found Pedesma's Meuse tutorial very helpful (https://cran.r-project.org/web/packages/gstat/vignettes/gstat.pdf).  Also, appreciation to Pebesma for assistance through answering questions. For this demonstration we use a 200 well 2D porosity dataset (file: 2D_MV_200Wells.csv) that may be found at https://github.com/GeostatsGuy/GeoDataSets.  I used this tutorial in my Introduction to Geostatistics undergraduate class (PGE337 at UT Austin) as part of a first introduction to R for the engineering undergraduate students. It is assumed that students have no previous R nor geostatistics experience; therefore, all steps of the code and workflow are explored and described. This tutorial is augmented with course notes.
+
+#### Load the required libraries
+
+```{r}
+library(gstat)                                 # geostatistical methods by Edzer Pebesma
+library(sp)                                    # spatial points addition to regular data frames
+library(plyr)                                  # manipulating data by Hadley Wickham 
+library(fields)                                # required for the image plots
+```
+
+If you get a package error, you may have to first go to "Tools/Install Packages..." to install these packages. Just type in the names one at a time into the package field and install.  The package names should autocomplete (helping you make sure you got the package name right), and the install process is automatic, with the possibility of installing other required dependency packages.  Previously, I had an issue with packages not being found after install that was resolved with a reboot. If you get warnings concerning the package being built on a previous R version, don't worry. This will not likely be an issue.
+
+#### Specify the grid parameters
+
+These parameters described the 2D regular grid that we will estimate on.  This is based on the Geo-DAS grid specification used in GSLIB, Geostatistical Library (Deutsch and Journel, 1998).
+
+# Specify the grid parameters (same as GSLIB / GEO-DAS parameterization in 2D)
+```{r}
+nx = 400                                       # number of cells in the x direction
+ny = 400                                       # number of cells in the y direction
+xsize = 40.0                                   # extent of cells in x direction
+ysize = 40.0                                   # extent of cells in y direction
+```
+
+Calculate the remaining required grid parameters and a vector or x and y grid values to use to put the correct axis lables on our plots.
+
+```{r}
+xmin = 0.0
+ymin = 0.0
+xmax = xmin + nx * xsize
+ymax = ymin + ny * ysize
+x<-seq(xmin,xmax,by=xsize)                     # used for axes on image plots
+y<-seq(ymin,ymax,by=ysize)                    
+```
+
+These parameters will be used by a function we define below to build a 2D array of cell center locations to indicate the locations of subsequent estimates.
+
+Let's defined the color map and color map number of discretizations for our plots. You could replace this with your prefered color map.
+
+```{r} 
+colmap = topo.colors(100)                      # define the color map and descritation
+```
+
+#### Declare functions
+
+I was surprised that there isn't a built-in method to transform a dataframe column or data vector to standard normal, Gaussian with a mean of zero, $\overline{x} = 0.0$ and a standard deviation $\sigma = 1.0$.  I found this function by Ashton Shortridge (2008) and included it here.  Just apply with the raw data as a vector, $x$, and it returns an object with the normal score values as a member vector, '[my_transform_object]$nscore'. 
+
+```{r}
+nscore <- function(x) {                        # by Ashton Shortridge, 2008
+  # Takes a vector of values x and calculates their normal scores. Returns 
+  # a list with the scores and an ordered table of original values and
+  # scores, which is useful as a back-transform table. See backtr().
+  nscore <- qqnorm(x, plot.it = FALSE)$x  # normal score 
+  trn.table <- data.frame(x=sort(x),nscore=sort(nscore))
+  return (list(nscore=nscore, trn.table=trn.table))
+}
+```
+
+I wrote this function to build a spatial points dataframe with the locations for estimation / simulation based on the Geo-DAS format that utilizes the parameters declared above. This is required by the estimation and simulation methods in the gstat package to know where to make estimates or simulations.   
+
+```{r}
+addcoord <- function(nx,xmin,xsize,ny,ymin,ysize) { # Michael Pyrcz, March, 2018                      
+  # makes a 2D dataframe with coordinates based on GSLIB specification
+  coords = matrix(nrow = nx*ny,ncol=2)
+  ixy = 1
+  for(iy in 1:nx) {
+    for(ix in 1:ny) {
+      coords[ixy,1] = xmin + (ix-1)*xsize  
+      coords[ixy,2] = ymin + (iy-1)*ysize 
+      ixy = ixy + 1
+    }
+  }
+  coords.df = data.frame(coords)
+  colnames(coords.df) <- c("X","Y")
+  coordinates(coords.df) =~X+Y
+  return (coords.df)
+
+}  
+
+```
+
+This is a convenience function that extracts an estimation model (ireal=1) or a single realization from the output of the estimation or simulation method in gstat into a 2D array that may be manipulated or visualized easily. 
+
+```{r}
+sim2darray <- function(spdataframe,nx,ny,ireal) { # Michael Pyrcz, March, 2018                      
+  # makes a 2D array from realizations spatial point dataframe
+  model = matrix(nrow = nx,ncol = ny)
+  ixy = 1
+  for(iy in 1:ny) {
+    for(ix in 1:nx) {
+      model[ix,iy] = spdataframe@data[ixy,ireal]  
+      ixy = ixy + 1
+    }
+  }
+  return (model)
+}  
+```
+
+This is another convenience function that extracts an estimation model (ireal=1) or a single realization from the output of the estimation or simulation method in gstat into a 1D vector that may be manipulated or visualized as a histogram or CDF easily.
+
+```{r}
+sim2vector <- function(spdataframe,nx,ny,ireal) { # Michael Pyrcz, March, 2018                      
+  # makes a 1D vector from spatial point dataframe
+  model = rep(0,nx*ny)
+  ixy = 1
+  for(iy in 1:ny) {
+    for(ix in 1:nx) {
+      model[ixy] = spdataframe@data[ixy,ireal]  
+      ixy = ixy + 1
+    }
+  }
+  return (model)
+} 
+```
+
+
+#### Set the working directory
+
+I always like to do this so I don't lose files and to simplify subsequent read and writes (avoid including the full address each time).
+
+```{r}
+setwd("C:/PGE337")
+```
+
+You will have to change this on Mac (e.g. "~/PGE").  If stuck consider using the GUI to set the working directory. Navigate to the working folder in 'Files' and then go to 'Files/More/Set As Working Directory' in the files pane to the right.  You can then copy the command from the console.
+
+#### Read the data table
+
+Copy the 2D_MV_200Wells.csv comma delimited file from https://github.com/GeostatsGuy/GeoDataSets to your working directory.
+
+```{r}
+mydata = read.csv("2D_MV_200Wells.csv")          # read in comma delimited data file
+```
+
+Let's visualize the first several rows of our data so we can make sure we successfully loaded the data file.
+
+```{r}
+head(mydata)                                   # preview first several rows in the console
+```
+
+The columns are variables with variable names at the top and the rows are samples.
+
+#### Data preparation and cleaning
+
+First, we must convert the dataframe to a spatial points dataframe.  We do this by defining the $X$ and $Y$ coordinates.  First we check the class to demonstrate that we have a dataframe, then we define the coordinates and check again and confirm that the dataframe object has upgraded to a spatial points dataframe.
+
+```{r}
+class(mydata)                                  # confirms that it is a dataframe
+coordinates(mydata) = ~X+Y                     # indicate the X, Y spatial coordinates
+```
+
+Let's check the dataset by producing summary statistics and visualizing the first several samples' spatial coordinates.
+
+```{r}
+summary(mydata)                                # confirms a spatial points dataframe
+head(coordinates(mydata))                      # check the first several coordinates
+```
+
+For calculation of the experimental variograms we often work with Gaussian transformed data.  We do this since the variogram of the Gaussian transform of the data is required for sequential Gaussian simulation.  In addition, the Gaussian transform often results in more interpretable variograms.
+
+```{r}
+npor.trn = nscore(mydata$porosity)             # normal scores transform
+mydata[["NPorosity"]]<-npor.trn$nscore         # append the normal scores transform 
+head(mydata)                                   # check the result
+```
+
+Normal scores transform of the porosity data to assist with variogram calculation.  We are going to assume variograms instead of calculate them, but I include this just incase you would like to add variogram calculation.  Since we are working with sequential Gaussian simulation, the simulation is in standard normal ($\mu_{z} = 0.0$, $\sigma^{2}_{z} = 1.0$); therefore,we must calculate the variograms of the standard normal transform (called NSCORE) of the data.  We can check the summary statistics of the new NSCORE variable.
+
+```{r}
+summary(mydata$NPorosity)
+```
+
+Now let's visualize the original porosity data distribution and also check the distribution of the normal score transform of the porosity data.  
+
+```{r}
+par(mfrow=c(2,2))                              # set up a 2x2 matrix of plots 
+hist(mydata$porosity,main="Porosity (%)",xlab="Porosity (%)",nclass = 15) # histogram
+plot(ecdf(mydata$porosity),main="Porosity",xlab="Porosity (%",ylab="Cumulative Probability") # CDF
+hist(mydata$NPorosity,main="N[Porosity (%)]",xlab="N[Porosity (%)]",nclass = 15) # histogram
+plot(ecdf(mydata$NPorosity),main="N[Porosity]",xlab="N[Porosity (%)]",ylab="Cumulative Probability") #CDF
+```
+
+#### Spatial visualization
+
+It is always good to visualize the data before estimation or simulation to evaluate the spatial arangement of the data. We will look at the general coverage of the data over the area of interest (AOI) (is there clustering or unsampled areas?), degree of continuity and for potential trends.  Let's start with a simple bubble plot.  We'll declare some plotting parameters first.  These are simply the color thresholds for the porosity estimates and estimation variance (for kriging) 2D output.
+
+```{r}
+cuts = c(.05,.07,.09,.11,.13,.15,.17,.19,.21,.23)
+cuts.var = c(0.05,.1,.15,.20,.25,.3,.35,.4,.45,.5,.55,.6,.65,.7,.75,.8,.85,.9,.95)
+```
+
+Now the bubble plot.
+
+```{r}
+bubble(mydata, "porosity", fill = FALSE, maxsize = 2, main ="Porosity (%)", identify = FALSE,xlab = "X (m)", ylab = "Y (m)")
+```
+
+Also, we could review a porosity data location map. 
+
+```{r}
+spplot(mydata, "porosity", do.log = TRUE,      # location map of porosity data
+       key.space=list(x=1.05,y=0.97,corner=c(0,1)),cuts = cuts,
+       scales=list(draw=T),xlab = "X (m)", ylab = "Y (m)",main ="Porosity (%)")
+```
+
+#### 2D grid specification 
+
+We have already defined a function that takes the Geo-DAS grid parameters and builds a spatial points dataframe with the estimation locations.  Note this is a cell-centered, regular grid.
+
+```{r}
+coords <- addcoord(nx,xmin,xsize,ny,ymin,ysize) # make a dataframe with all the estimation locations
+summary(coords)                                # check the coordinates
+```
+
+#### Variogram modeling
+
+Let's calculate the key summary statistics from the porosity variable. We will need the minimum and maximum in an 2x1 array to send to the plotting program (image) as the variable color bar limits.  We also need the sill ($\sigma_{z}^{2}$ of porosity).  Typically we would model the varriogram with a sill of 1.0 for simulation.  The simulation program in gstat is coded to not back transform to the original data distribution if the sill is 1.0.  The simulation output is standard normal.  Therefore we will model to the sill equal to the variance of the data.  It is essential that we model to the sill for simulation, if we model with nested contributions of spatial structures greater than or less than the sill we could create a bias in the distribution variance. We will scale our fractional contributions by the sill from the data variance to make sure we get this right.  
+
+```{r}
+sill = var(mydata$porosity)                    # calculate the variance of the property of interest as the sill
+min = min(mydata$porosity)                     # calculate the property min and max for plotting
+max = max(mydata$porosity)               
+zlim = c(min,max)                              # define the property min and max in a 2x1 vextor
+```
+
+Let's assume some three variogram models and observe the results. Feel free to change the variogram parameters.  Make sure the fractional contributions of the spherical (psill) and the nugget sum to 1.0 so that the total sill is equal to the variance of the property of interest. 
+
+```{r}
+vm.nug1 <- vgm(psill = 0.5*sill, "Sph", 400, anis = c(000, 1.0),nugget=0.5*sill)
+vm.nug1
+vm.ani1 <- vgm(psill = 1.0*sill, "Exp", 200, anis = c(035, 0.5),nugget=0.0*sill)
+vm.ani1
+vm.ani2 <- vgm(psill = 1.0*sill, "Sph", 600, anis = c(060, 0.2),nugget=0.0*sill)
+vm.ani2
+```
+
+#### Sequential Gaussian Simulation 
+
+Now let's calculate 4 realizations with each variogram.  Note: by setting nsim the krige function switches to simulation with ordinary kriging. If we leave out the nsim parameter the krige function will calculate an ordinary kriging model.
+```{r}
+condsim.nug1 = krige(porosity~1, mydata, coords, model = vm.nug1, nmax = 100, nsim = 4)
+condsim.ani1 = krige(porosity~1, mydata, coords, model = vm.ani1, nmax = 100, nsim = 4)
+condsim.ani2 = krige(porosity~1, mydata, coords, model = vm.ani2, nmax = 100, nsim = 4)
+```
+
+The nmax parameter is the maximum number of local data for each kriging solution.  If you omit this parameter then the funciton will assume infinity.  For larger models this will result in very long simulation times due to the sequential addition of data (previously simulated nodes).  If you simulations do not reproduce the variogram model then you may need to increase the nmax parameter. 
+
+Here's the four realizations for the first variogram.
+
+```{r}
+par(mfrow=c(2,2))
+real1 <- sim2darray(condsim.nug1,nx,ny,1)      # extract realization #1 to a 2D array and plot
+image.plot(real1,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #1", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+
+real2 <- sim2darray(condsim.nug1,nx,ny,2)      # extract realization #2 to a 2D array and plot
+image.plot(real2,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #2", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+
+real3 <- sim2darray(condsim.nug1,nx,ny,3)      # extract realization #3 to a 2D array and plot
+image.plot(real3,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #3", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+
+real4 <- sim2darray(condsim.nug1,nx,ny,4)      # extract realization #4 to a 2D array and plot
+image.plot(real4,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #4", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+```
+
+Here's the four realizations for the second variogram.
+
+```{r}
+par(mfrow=c(2,2))
+real1 <- sim2darray(condsim.ani1,nx,ny,1)      # extract realization #1 to a 2D array and plot
+image.plot(real1,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #1", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+
+real2 <- sim2darray(condsim.ani1,nx,ny,2)      # extract realization #2 to a 2D array and plot
+image.plot(real2,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #2", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+
+real3 <- sim2darray(condsim.ani1,nx,ny,3)      # extract realization #3 to a 2D array and plot
+image.plot(real3,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #3", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+
+real4 <- sim2darray(condsim.ani1,nx,ny,4)      # extract realization #4 to a 2D array and plot
+image.plot(real4,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #4", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+```
+
+Here's the four realizations for the third variogram.
+
+```{r}
+par(mfrow=c(2,2))
+real1 <- sim2darray(condsim.ani2,nx,ny,1)      # extract realization #1 to a 2D array and plot
+image.plot(real1,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #1", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+
+real2 <- sim2darray(condsim.ani2,nx,ny,2)      # extract realization #2 to a 2D array and plot
+image.plot(real2,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #2", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+
+real3 <- sim2darray(condsim.ani2,nx,ny,3)      # extract realization #3 to a 2D array and plot
+image.plot(real3,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #3", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+
+real4 <- sim2darray(condsim.ani2,nx,ny,4)      # extract realization #4 to a 2D array and plot
+image.plot(real4,x=x,y=y,xlab="X(m)",ylab="Y(m)",zlim = zlim,col=colmap,legend.shrink = 0.6); mtext(line=1, side=3, "Realization #4", outer=F);box(which="plot")
+points(mydata$X,mydata$Y,pch="+",cex=1.0,col="black") # add well locations
+```
+
+There is a paper by Leuangthong, McLennan and Deutsch (2004) on the miminum acceptance criteria for geostatistical realizations.  They suggest checking the realization distributions (CDFs) and spatial continuity (vairograms).  Let's calculate the realization CDFs and variograms and compare with the model inputs. 
+
+```{r}
+# First variogram model
+# Plot the CDFs for the 4 realizations and compare to the raw data CDF
+plot(ecdf(condsim.nug1@data[,1]),main="High Nugget",xlab="Gaussian Values",ylab="Cumulative Probability",col="red")
+plot(ecdf(condsim.nug1@data[,2]),add=TRUE,col="red")
+plot(ecdf(condsim.nug1@data[,3]),add=TRUE,col="red")
+plot(ecdf(condsim.nug1@data[,4]),add=TRUE,col="red")
+plot(ecdf(mydata$porosity),add=TRUE,col="black")
+
+# Calculate the varograms for the major and minor directions and compare to the variogram model
+# We just arbitrarily picked 035, 125 azimuth, model is isotropic so direction shouldn't matter
+vg.sim1.035 = variogram(sim1~1,condsim.nug1,cutoff = 1000,width =20,alpha = 35.0,tol.hor=22.5) 
+vg.sim1.125 = variogram(sim1~1,condsim.nug1,cutoff = 1000,width =20,alpha = 125.0,tol.hor=22.5) 
+vg.sim2.035 = variogram(sim2~1,condsim.nug1,cutoff = 1000,width =20,alpha = 35.0,tol.hor=22.5) 
+vg.sim2.125 = variogram(sim2~1,condsim.nug1,cutoff = 1000,width =20,alpha = 125.0,tol.hor=22.5) 
+vg.sim3.035 = variogram(sim3~1,condsim.nug1,cutoff = 1000,width =20,alpha = 35.0,tol.hor=22.5) 
+vg.sim3.125 = variogram(sim3~1,condsim.nug1,cutoff = 1000,width =20,alpha = 125.0,tol.hor=22.5) 
+vg.sim4.035 = variogram(sim4~1,condsim.nug1,cutoff = 1000,width =20,alpha = 35.0,tol.hor=22.5) 
+vg.sim4.125 = variogram(sim4~1,condsim.nug1,cutoff = 1000,width =20,alpha = 125.0,tol.hor=22.5) 
+
+# Plot the vairograms from the realizations and the model variogram.
+plot(vg.sim1.035$dist,vg.sim1.035$gamma,pch=19,cex=0.1,main="High Nugget",xlab="  Lag Distance (m) ",ylab=" Semivariogram ", col="black",xlim=c(0,1000),ylim=c(0,1.2*sill))
+points(vg.sim1.125$dist,vg.sim1.125$gamma,pch=19,cex=0.1,col="red")
+points(vg.sim2.035$dist,vg.sim2.035$gamma,pch=19,cex=0.1,col="black")
+points(vg.sim2.125$dist,vg.sim2.125$gamma,pch=19,cex=0.1,col="red")
+points(vg.sim3.035$dist,vg.sim3.035$gamma,pch=19,cex=0.1,col="black")
+points(vg.sim3.125$dist,vg.sim3.125$gamma,pch=19,cex=0.1,col="red")
+points(vg.sim4.035$dist,vg.sim4.035$gamma,pch=19,cex=0.1,col="black")
+points(vg.sim4.125$dist,vg.sim4.125$gamma,pch=19,cex=0.1,col="red")
+abline(h = 1.0*sill)
+# Include variogram model
+unit_vector = c(0,1,0)                         # unit vector for 000 azimuth
+vm.nug1.000 <- variogramLine(vm.nug1,maxdist=1000,min=0.0001,n=100,dir=unit_vector,covariance=FALSE) # calculate 035 variogram model
+lines(vm.nug1.000$dist,vm.nug1.000$gamma,pch=19,cex=0.1,col="black") # include variogram model 
+unit_vector = c(1,0,0)                         # unit vector for 090 azimuth
+vm.ani.090 <- variogramLine(vm.nug1,maxdist=1000,min=0.0001,n=100,dir=unit_vector,covariance=FALSE) # calculate 125 variogram model
+lines(vm.ani.090$dist,vm.ani.090$gamma,col="red") 
+
+# Second variogram model
+# Plot the CDFs for the 4 realizations and compare to the raw data CDF
+plot(ecdf(condsim.ani1@data[,1]),main="Low Aniostropic",xlab="Gaussian Values",ylab="Cumulative Probability",col="red")
+plot(ecdf(condsim.ani1@data[,2]),add=TRUE,col="red")
+plot(ecdf(condsim.ani1@data[,3]),add=TRUE,col="red")
+plot(ecdf(condsim.ani1@data[,4]),add=TRUE,col="red")
+plot(ecdf(mydata$porosity),add=TRUE,col="black")
+
+vg.sim1.035 = variogram(sim1~1,condsim.ani1,cutoff = 1000,width =20,alpha = 35.0,tol.hor=22.5) 
+vg.sim1.125 = variogram(sim1~1,condsim.ani1,cutoff = 1000,width =20,alpha = 125.0,tol.hor=22.5) 
+vg.sim2.035 = variogram(sim2~1,condsim.ani1,cutoff = 1000,width =20,alpha = 35.0,tol.hor=22.5) 
+vg.sim2.125 = variogram(sim2~1,condsim.ani1,cutoff = 1000,width =20,alpha = 125.0,tol.hor=22.5) 
+vg.sim3.035 = variogram(sim3~1,condsim.ani1,cutoff = 1000,width =20,alpha = 35.0,tol.hor=22.5) 
+vg.sim3.125 = variogram(sim3~1,condsim.ani1,cutoff = 1000,width =20,alpha = 125.0,tol.hor=22.5) 
+vg.sim4.035 = variogram(sim4~1,condsim.ani1,cutoff = 1000,width =20,alpha = 35.0,tol.hor=22.5) 
+vg.sim4.125 = variogram(sim4~1,condsim.ani1,cutoff = 1000,width =20,alpha = 125.0,tol.hor=22.5) 
+
+plot(vg.sim1.035$dist,vg.sim1.035$gamma,pch=19,cex=0.1,main="Low Anisotropic",xlab="  Lag Distance (m) ",ylab=" Semivariogram ", col="black",xlim=c(0,1000),ylim=c(0,1.2*sill))
+points(vg.sim1.125$dist,vg.sim1.125$gamma,pch=19,cex=0.1,col="red")
+points(vg.sim2.035$dist,vg.sim2.035$gamma,pch=19,cex=0.1,col="black")
+points(vg.sim2.125$dist,vg.sim2.125$gamma,pch=19,cex=0.1,col="red")
+points(vg.sim3.035$dist,vg.sim3.035$gamma,pch=19,cex=0.1,col="black")
+points(vg.sim3.125$dist,vg.sim3.125$gamma,pch=19,cex=0.1,col="red")
+points(vg.sim4.035$dist,vg.sim4.035$gamma,pch=19,cex=0.1,col="black")
+points(vg.sim4.125$dist,vg.sim4.125$gamma,pch=19,cex=0.1,col="red")
+abline(h = 1.0*sill)
+# Include variogram model
+unit_vector = c(sin(35*pi/180),cos(35*pi/180),0) # unit vector for 035 azimuth
+vm.nug1.035 <- variogramLine(vm.ani1,maxdist=1000,min=0.0001,n=100,dir=unit_vector,covariance=FALSE) # calculate 035 variogram model
+lines(vm.nug1.035$dist,vm.nug1.035$gamma,pch=19,cex=0.1,col="black") # include variogram model 
+
+unit_vector = c(sin(55*pi/180),-1*cos(35*pi/180),0) # unit vector for 125 azimuth
+vm.ani.125 <- variogramLine(vm.ani1,maxdist=1000,min=0.0001,n=100,dir=unit_vector,covariance=FALSE) # calculate 125 variogram model
+lines(vm.ani.125$dist,vm.ani.125$gamma,col="red") # include variogram model
+
+# Third variogram model
+# Plot the CDFs for the 4 realizations and compare to the raw data CDF
+plot(ecdf(condsim.ani2@data[,1]),main="High Aniostropic",xlab="Gaussian Values",ylab="Cumulative Probability",col="red")
+plot(ecdf(condsim.ani2@data[,2]),add=TRUE,col="red")
+plot(ecdf(condsim.ani2@data[,3]),add=TRUE,col="red")
+plot(ecdf(condsim.ani2@data[,4]),add=TRUE,col="red")
+plot(ecdf(mydata$porosity),add=TRUE,col="black")
+
+vg.sim1.060 = variogram(sim1~1,condsim.ani2,cutoff = 1000,width =20,alpha = 60.0,tol.hor=22.5) 
+vg.sim1.150 = variogram(sim1~1,condsim.ani2,cutoff = 1000,width =20,alpha = 150.0,tol.hor=22.5) 
+vg.sim2.060 = variogram(sim2~1,condsim.ani2,cutoff = 1000,width =20,alpha = 60.0,tol.hor=22.5) 
+vg.sim2.150 = variogram(sim2~1,condsim.ani2,cutoff = 1000,width =20,alpha = 150.0,tol.hor=22.5) 
+vg.sim3.060 = variogram(sim3~1,condsim.ani2,cutoff = 1000,width =20,alpha = 60.0,tol.hor=22.5) 
+vg.sim3.150 = variogram(sim3~1,condsim.ani2,cutoff = 1000,width =20,alpha = 150.0,tol.hor=22.5) 
+vg.sim4.060 = variogram(sim4~1,condsim.ani2,cutoff = 1000,width =20,alpha = 60.0,tol.hor=22.5) 
+vg.sim4.150 = variogram(sim4~1,condsim.ani2,cutoff = 1000,width =20,alpha = 150.0,tol.hor=22.5) 
+
+plot(vg.sim1.060$dist,vg.sim1.060$gamma,pch=19,cex=0.1,main="High Anisotropic",xlab="  Lag Distance (m) ",ylab=" Semivariogram ", col="black",xlim=c(0,1000),ylim=c(0,1.2*sill))
+points(vg.sim1.150$dist,vg.sim1.150$gamma,pch=19,cex=0.1,col="red")
+points(vg.sim2.060$dist,vg.sim2.060$gamma,pch=19,cex=0.1,col="black")
+points(vg.sim2.150$dist,vg.sim2.150$gamma,pch=19,cex=0.1,col="red")
+points(vg.sim3.060$dist,vg.sim3.060$gamma,pch=19,cex=0.1,col="black")
+points(vg.sim3.150$dist,vg.sim3.150$gamma,pch=19,cex=0.1,col="red")
+points(vg.sim4.060$dist,vg.sim4.060$gamma,pch=19,cex=0.1,col="black")
+points(vg.sim4.150$dist,vg.sim4.150$gamma,pch=19,cex=0.1,col="red")
+abline(h = 1.0*sill)
+# Include variogram model
+unit_vector = c(sin(60*pi/180),cos(60*pi/180),0) # unit vector for 060 azimuth
+vm.nug1.060 <- variogramLine(vm.ani2,maxdist=1000,min=0.0001,n=100,dir=unit_vector,covariance=FALSE) # calculate 035 variogram model
+lines(vm.nug1.060$dist,vm.nug1.060$gamma,pch=19,cex=0.1,col="black") # include variogram model 
+
+unit_vector = c(sin(30*pi/180),-1*cos(60*pi/180),0) # unit vector for 125 azimuth
+vm.ani.150 <- variogramLine(vm.ani2,maxdist=1000,min=0.0001,n=100,dir=unit_vector,covariance=FALSE) # calculate 125 variogram model
+lines(vm.ani.150$dist,vm.ani.150$gamma,col="red") # include variogram model
+```
+
+There are so many more tests that one could attempt to gain experience with of spaital estimation.  I'll end here for brevity, but invite you to continue.  Consider, on your own changing the variogram parameters and observe the results.  Also attempt kriging with a trend.
+
+I hope you found this tutorial useful.  I'm always happy to discuss geostatistics, statistical modeling, uncertainty modeling and machine learning,
+
+
+![](c:/PGE337/mjp_signature.png)
+
+
+Michael Pyrcz, Ph.D., P.Eng.
+
+Associate Professor
+
+The Hildebrand Department of Petroleum and Geosystems Engineering
+
+The University of Texas at Austin
